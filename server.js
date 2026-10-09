@@ -8,42 +8,15 @@ app.use(cors());
 const CAMERA_ID = 'PICK-CCTV-0020';
 const MEDIA_SERVER_BASE = `https://sfs-msc-pub-lq-02.navigator.dot.ga.gov/rtplive/${CAMERA_ID}`;
 
-// Helper function to obtain token from 511GA
-async function fetchToken() {
-  const customHeaders = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': '*/*',
-    'Referer': 'https://511ga.org/',
-    'X-Requested-With': 'XMLHttpRequest'
-  };
-
-  // 1. Fetch 511GA CCTV detail panel html
-  const response = await axios.post(
-    'https://511ga.org/map/Cctv/19637',
-    {},
-    { headers: customHeaders, timeout: 10000 }
-  ).catch(async () => {
-    // Fallback to GET if POST is rejected
-    return await axios.get('https://511ga.org/map/Cctv/19637', { headers: customHeaders, timeout: 10000 });
-  });
-
-  const htmlData = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
-
-  // 2. Extract JWT token string
-  const tokenMatch = htmlData.match(/token=([a-zA-Z0-9\._\-]+)/i) || 
-                     htmlData.match(/eyJ[a-zA-Z0-9\._\-]+/);
-
-  if (!tokenMatch) {
-    throw new Error('JWT stream token not found in 511GA response.');
-  }
-
-  return tokenMatch[1] || tokenMatch[0];
-}
-
-// Stream proxy endpoint
 app.get('/stream.m3u8', async (req, res) => {
   try {
-    const token = await fetchToken();
+    // 1. Get token from query param (e.g. /stream.m3u8?token=eyJ...)
+    const token = req.query.token;
+
+    if (!token) {
+      return res.status(400).send('Missing token parameter. Append ?token=YOUR_JWT_TOKEN');
+    }
+
     const masterUrl = `${MEDIA_SERVER_BASE}/playlist.m3u8?token=${token}`;
 
     const response = await axios.get(masterUrl, {
@@ -55,7 +28,7 @@ app.get('/stream.m3u8', async (req, res) => {
 
     let manifest = response.data;
 
-    // Rewrite relative sub-playlist links (chunklist_...) to include token & absolute media path
+    // 2. Rewrite relative sub-playlist lines (chunklist_...) to include token & absolute media path
     manifest = manifest.replace(/^(chunklist_[^\s]+\.m3u8.*)$/gm, (match) => {
       const cleanFile = match.split('?')[0];
       return `${MEDIA_SERVER_BASE}/${cleanFile}?token=${token}`;
