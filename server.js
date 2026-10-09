@@ -5,48 +5,51 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
-// Camera ID parameters from 511GA network trace
 const IMAGE_ID = '19637'; 
 const CAMERA_ID = 'PICK-CCTV-0020';
 const MEDIA_SERVER_BASE = `https://sfs-msc-pub-lq-02.navigator.dot.ga.gov/rtplive/${CAMERA_ID}`;
 
-// Fetch fresh stream URL + dynamic token straight from 511GA's video token service
-async function fetchStreamWithToken() {
+// Helper: Attempt to query GetVideoUrl across its possible relative paths
+async function fetchTokenFromGetVideoUrl() {
   const customHeaders = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/plain, */*',
-    'Referer': 'https://511ga.org/cctv',
+    'Referer': 'https://511ga.org/',
     'X-Requested-With': 'XMLHttpRequest'
   };
 
-  // 1. Hit the GetVideoUrl endpoint visible in your network dev tools
-  const urlRes = await axios.get(`https://511ga.org/cctv/GetVideoUrl?imageId=${IMAGE_ID}&_=${Date.now()}`, {
-    headers: customHeaders,
-    timeout: 8000
-  });
+  // Paths to try in order based on DevTools trace
+  const candidateUrls = [
+    `https://511ga.org/GetVideoUrl?imageId=${IMAGE_ID}&_=${Date.now()}`,
+    `https://511ga.org/map/GetVideoUrl?imageId=${IMAGE_ID}&_=${Date.now()}`,
+    `https://511ga.org/cctv/GetVideoUrl?imageId=${IMAGE_ID}&_=${Date.now()}`
+  ];
 
-  // Extract stream URL or raw token from JSON response
-  let streamUrl = typeof urlRes.data === 'string' ? urlRes.data : urlRes.data.url || urlRes.data.Url || urlRes.data.videoUrl;
+  for (const targetUrl of candidateUrls) {
+    try {
+      const response = await axios.get(targetUrl, { headers: customHeaders, timeout: 5000 });
+      const responseData = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
 
-  if (!streamUrl) {
-    throw new Error('GetVideoUrl returned an empty response.');
+      const tokenMatch = responseData.match(/token=([a-zA-Z0-9\._\-]+)/i) || 
+                         responseData.match(/eyJ[a-zA-Z0-9\._\-]+/);
+
+      if (tokenMatch) {
+        return tokenMatch[1] || tokenMatch[0];
+      }
+    } catch (err) {
+      // Continue trying next candidate URL
+      continue;
+    }
   }
 
-  // Extract token parameter from the returned stream URL
-  const tokenMatch = streamUrl.match(/token=([a-zA-Z0-9\._\-]+)/);
-  if (!tokenMatch) {
-    throw new Error('Could not parse token from GetVideoUrl response.');
-  }
-
-  return tokenMatch[1];
+  throw new Error('GetVideoUrl returned 404 or missing token across all endpoints.');
 }
 
 app.get('/stream.m3u8', async (req, res) => {
   try {
-    const token = await fetchStreamWithToken();
+    const token = await fetchTokenFromGetVideoUrl();
     const masterUrl = `${MEDIA_SERVER_BASE}/playlist.m3u8?token=${token}`;
 
-    // Request the master playlist from GDOT using the fresh token
     const playlistResponse = await axios.get(masterUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
@@ -56,7 +59,7 @@ app.get('/stream.m3u8', async (req, res) => {
 
     let manifest = playlistResponse.data;
 
-    // Rewrite relative chunklist URLs to route directly to GDOT media server with active token
+    // Rewrite relative sub-playlists to route directly to GDOT with active token
     manifest = manifest.replace(/^(chunklist_[^\s]+\.m3u8.*)$/gm, (match) => {
       const cleanFile = match.split('?')[0];
       return `${MEDIA_SERVER_BASE}/${cleanFile}?token=${token}`;
@@ -66,7 +69,7 @@ app.get('/stream.m3u8', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.send(manifest);
   } catch (error) {
-    console.error('Proxy Error:', error.message);
+    console.error('Proxy Stream Error:', error.message);
     res.status(500).send(`Error fetching live stream: ${error.message}`);
   }
 });
