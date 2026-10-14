@@ -28,9 +28,18 @@ async function getBrowserToken() {
   let browser = null;
   try {
     console.log('Launching headless browser to capture live 511GA token...');
+    
+    // Launch with configuration optimized for Render's Linux environment
     browser = await puppeteer.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined, // Uses Render system chrome if set
+      args: [
+        '--no-sandbox', 
+        '--disable-setuid-sandbox', 
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--single-process'
+      ]
     });
 
     const page = await browser.newPage();
@@ -53,7 +62,6 @@ async function getBrowserToken() {
       timeout: 25000
     });
 
-    // Wait for the video player network requests to fire
     await new Promise(resolve => setTimeout(resolve, 6000));
 
     if (!capturedToken) {
