@@ -9,76 +9,62 @@ const API_KEY = '3ca9a6a23e314e9fb043dcc8f5db3829';
 const CAMERA_SOURCE_ID = 'PICK-CCTV-0020';
 const MEDIA_SERVER_BASE = `https://sfs-msc-pub-lq-02.navigator.dot.ga.gov/rtplive/${CAMERA_SOURCE_ID}`;
 
-let cachedToken = null;
-let tokenExpiry = 0;
+let cachedManifest = null;
+let cacheExpiry = 0;
 
-async function getValidToken() {
+async function getStreamManifest() {
   const now = Date.now();
-  if (cachedToken && now < tokenExpiry) {
-    return cachedToken;
+  if (cachedManifest && now < cacheExpiry) {
+    return cachedManifest;
   }
 
-  try {
-    // 1. Fetch camera data list via API key
-    const response = await axios.get(`https://511ga.org/api/v2/get/cameras?key=${API_KEY}&format=json`, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 10000
-    });
+  // 1. Fetch camera data list using the official API key
+  const response = await axios.get(`https://511ga.org/api/v2/get/cameras?key=${API_KEY}&format=json`, {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+    timeout: 10000
+  });
 
-    const cameras = Array.isArray(response.data) ? response.data : (response.data.Cameras || response.data.data || []);
-    const cam = cameras.find(c => c.SourceId === CAMERA_SOURCE_ID || (c.Name && c.Name.includes(CAMERA_SOURCE_ID)));
+  const cameras = Array.isArray(response.data) ? response.data : (response.data.Cameras || response.data.data || []);
+  const cam = cameras.find(c => c.SourceId === CAMERA_SOURCE_ID || (c.Name && c.Name.includes(CAMERA_SOURCE_ID)));
 
-    if (!cam) {
-      throw new Error(`Camera ${CAMERA_SOURCE_ID} not found in API response.`);
-    }
-
-    const viewId = cam.Views && cam.Views[0] ? cam.Views[0].Id : 19637;
-
-    // 2. Request the stream token directly from 511GA's video URL endpoint using proper headers
-    const videoUrlRes = await axios.get(`https://511ga.org/GetVideoUrl?imageId=${viewId}&_=${Date.now()}`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Accept': 'application/json, text/plain, */*',
-        'Referer': `https://511ga.org/map/Cctv/${viewId}`,
-        'X-Requested-With': 'XMLHttpRequest'
-      },
-      timeout: 8000
-    });
-
-    const dataStr = typeof videoUrlRes.data === 'string' ? videoUrlRes.data : JSON.stringify(videoUrlRes.data);
-    const tokenMatch = dataStr.match(/token=([a-zA-Z0-9\._\-]+)/) || dataStr.match(/(eyJ[a-zA-Z0-9\._\-]+)/);
-
-    if (!tokenMatch) {
-      throw new Error('Token not found in GetVideoUrl response.');
-    }
-
-    cachedToken = tokenMatch[1] || tokenMatch[0];
-    tokenExpiry = now + 45000; // Cache for 45 seconds
-    return cachedToken;
-  } catch (error) {
-    console.error('Token Generation Error:', error.message);
-    if (cachedToken) return cachedToken;
-    throw error;
+  if (!cam) {
+    throw new Error(`Camera ${CAMERA_SOURCE_ID} not found in API response.`);
   }
-}
 
-app.get('/stream.m3u8', async (req, res) => {
-  try {
-    const token = await getValidToken();
-    const masterUrl = `${MEDIA_SERVER_BASE}/playlist.m3u8?token=${token}`;
+  // 2. Extract any token or stream URL embedded in the Views array
+  let token = null;
+  const camString = JSON.stringify(cam);
+  const tokenMatch = camString.match(/token=([a-zA-Z0-9\._\-]+)/) || camString.match(/(eyJ[a-zA-Z0-9\._\-]+)/);
 
-    const response = await axios.get(masterUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://511ga.org/' }
-    });
+  if (tokenMatch) {
+    token = tokenMatch[1] || tokenMatch[0];
+  }
 
-    let manifest = response.data;
+  // Fallback: If the API object doesn't inline the token, fetch the media server playlist directly using a standard session or public stream URL structure
+  const masterUrl = token ? `${MEDIA_SERVER_BASE}/playlist.m3u8?token=${token}` : `${MEDIA_SERVER_BASE}/playlist.m3u8`;
 
-    // Rewrite sub-playlist paths to route through proxy with active token
+  const playlistResponse = await axios.get(masterUrl, {
+    headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://511ga.org/' }
+  });
+
+  let manifest = playlistResponse.data;
+
+  // Rewrite sub-playlist paths to route through proxy
+  if (token) {
     manifest = manifest.replace(/^(chunklist_[^\s]+\.m3u8.*)$/gm, (match) => {
       const cleanFile = match.split('?')[0];
       return `${MEDIA_SERVER_BASE}/${cleanFile}?token=${token}`;
     });
+  }
 
+  cachedManifest = manifest;
+  cacheExpiry = now + 30000; // Cache manifest for 30 seconds
+  return cachedManifest;
+}
+
+app.get('/stream.m3u8', async (req, res) => {
+  try {
+    const manifest = await getStreamManifest();
     res.setHeader('Content-Type', 'application/x-mpegURL');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.send(manifest);
@@ -89,7 +75,7 @@ app.get('/stream.m3u8', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('511GA API-Authenticated Proxy Active');
+  res.send('511GA API Proxy Active');
 });
 
 const PORT = process.env.PORT || 3000;
