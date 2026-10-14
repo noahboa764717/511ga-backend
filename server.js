@@ -19,45 +19,51 @@ async function getValidToken() {
   }
 
   try {
+    // 1. Fetch cameras list using API key
     const response = await axios.get(`https://511ga.org/api/v2/get/cameras?key=${API_KEY}&format=json`, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
       timeout: 10000
     });
 
-    // Handle different root response wrappers
     const cameras = Array.isArray(response.data) ? response.data : (response.data.Cameras || response.data.data || []);
-    
-    // Find the specific camera by SourceId
     const cam = cameras.find(c => c.SourceId === CAMERA_SOURCE_ID || (c.Name && c.Name.includes(CAMERA_SOURCE_ID)));
 
     if (!cam) {
-      console.error('Available camera sample IDs:', cameras.slice(0, 5).map(c => c.SourceId));
       throw new Error(`Camera ${CAMERA_SOURCE_ID} not found in API response.`);
     }
 
-    // Print full camera object to Render logs for inspection if needed
-    console.log('Found Camera Object:', JSON.stringify(cam, null, 2));
-
-    let token = null;
-
-    // Search through all properties, views, or URLs inside the camera object
-    const camString = JSON.stringify(cam);
-    const tokenMatch = camString.match(/token=([a-zA-Z0-9\._\-]+)/) || camString.match(/(eyJ[a-zA-Z0-9\._\-]+)/);
-
-    if (tokenMatch) {
-      token = tokenMatch[1] || tokenMatch[0];
+    // 2. Extract the internal View ID (e.g., 19637) from the Views array
+    const viewId = cam.Views && cam.Views[0] ? cam.Views[0].Id : null;
+    if (!viewId) {
+      throw new Error('No view ID found for camera.');
     }
 
-    if (!token) {
-      throw new Error('Could not extract token pattern from camera JSON properties.');
+    // 3. Request token using the view ID
+    const customHeaders = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Accept': 'application/json, text/plain, */*',
+      'Referer': `https://511ga.org/map/Cctv/${viewId}`,
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+
+    const tokenRes = await axios.get(`https://511ga.org/map/Cctv/${viewId}`, {
+      headers: customHeaders,
+      timeout: 8000
+    });
+
+    const pageText = typeof tokenRes.data === 'string' ? tokenRes.data : JSON.stringify(tokenRes.data);
+    const tokenMatch = pageText.match(/token=([a-zA-Z0-9\._\-]+)/i) || pageText.match(/(eyJ[a-zA-Z0-9\._\-]+)/);
+
+    if (!tokenMatch) {
+      throw new Error('Could not parse token from CCTV page response.');
     }
 
-    cachedToken = token;
+    cachedToken = tokenMatch[1] || tokenMatch[0];
     tokenExpiry = now + 45000; // Cache for 45 seconds
     return cachedToken;
   } catch (error) {
-    console.error('API Token Fetch Error:', error.message);
-    if (cachedToken) return cachedToken; // Fallback to cache if available
+    console.error('Token Generation Error:', error.message);
+    if (cachedToken) return cachedToken;
     throw error;
   }
 }
