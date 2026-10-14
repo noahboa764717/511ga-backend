@@ -1,7 +1,8 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 
 const app = express();
 app.use(cors());
@@ -14,76 +15,65 @@ let cachedToken = null;
 let tokenExpiry = 0;
 let isFetching = false;
 
-async function getBrowserToken() {
+async function getCloudBrowserToken() {
   const now = Date.now();
-  if (cachedToken && now < tokenExpiry) {
-    return cachedToken;
-  }
+  if (cachedToken && now < tokenExpiry) return cachedToken;
   if (isFetching) {
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(r => setTimeout(r, 2000));
     if (cachedToken) return cachedToken;
   }
 
   isFetching = true;
   let browser = null;
   try {
-    console.log('Launching headless browser to capture live 511GA token...');
+    console.log('Launching serverless Chromium instance...');
     
-    // Launch with configuration optimized for Render's Linux environment
+    // Configure Chromium for cloud environments
+    chromium.setHeadlessMode = true;
+    chromium.setGraphicsMode = false;
+
     browser = await puppeteer.launch({
-      headless: true,
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined, // Uses Render system chrome if set
-      args: [
-        '--no-sandbox', 
-        '--disable-setuid-sandbox', 
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--single-process'
-      ]
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
     });
 
     const page = await browser.newPage();
     let capturedToken = null;
 
     await page.setRequestInterception(true);
-    page.on('request', interceptedRequest => {
-      const url = interceptedRequest.url();
+    page.on('request', req => {
+      const url = req.url();
       if (url.includes('token=')) {
         const match = url.match(/token=([a-zA-Z0-9\._\-]+)/);
-        if (match && match[1]) {
-          capturedToken = match[1];
-        }
+        if (match && match[1]) capturedToken = match[1];
       }
-      interceptedRequest.continue();
+      req.continue();
     });
 
     await page.goto(`https://511ga.org/map/Cctv/${VIEW_ID}`, {
       waitUntil: 'networkidle2',
-      timeout: 25000
+      timeout: 30000
     });
 
-    await new Promise(resolve => setTimeout(resolve, 6000));
+    await new Promise(r => setTimeout(r, 5000));
 
     if (!capturedToken) {
-      const pageContent = await page.content();
-      const match = pageContent.match(/token=([a-zA-Z0-9\._\-]+)/) || pageContent.match(/(eyJ[a-zA-Z0-9\._\-]+)/);
-      if (match) {
-        capturedToken = match[1] || match[0];
-      }
+      const content = await page.content();
+      const match = content.match(/token=([a-zA-Z0-9\._\-]+)/);
+      if (match) capturedToken = match[1];
     }
 
-    if (!capturedToken) {
-      throw new Error('Could not capture token via browser interception.');
-    }
+    if (!capturedToken) throw new Error('Failed to intercept stream token.');
 
     cachedToken = capturedToken;
-    tokenExpiry = now + 90000; // Cache valid for 90 seconds
-    console.log('Successfully captured fresh video token.');
+    tokenExpiry = now + 90000; // Cache for 90 seconds
     return cachedToken;
-  } catch (error) {
-    console.error('Puppeteer Error:', error.message);
+  } catch (err) {
+    console.error('Chromium Token Error:', err.message);
     if (cachedToken) return cachedToken;
-    throw error;
+    throw err;
   } finally {
     isFetching = false;
     if (browser) await browser.close();
@@ -92,7 +82,7 @@ async function getBrowserToken() {
 
 app.get('/stream.m3u8', async (req, res) => {
   try {
-    const token = await getBrowserToken();
+    const token = await getCloudBrowserToken();
     const masterUrl = `${MEDIA_SERVER_BASE}/playlist.m3u8?token=${token}`;
 
     const response = await axios.get(masterUrl, {
@@ -109,14 +99,11 @@ app.get('/stream.m3u8', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.send(manifest);
   } catch (error) {
-    console.error('Proxy Error:', error.message);
-    res.status(500).send(`Error proxying stream: ${error.message}`);
+    res.status(500).send(`Proxy Error: ${error.message}`);
   }
 });
 
-app.get('/', (req, res) => {
-  res.send('Puppeteer 511GA Video Proxy Active');
-});
+app.get('/', (req, res) => res.send('Sparticuz Chromium Proxy Active'));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Proxy running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Running on port ${PORT}`));
