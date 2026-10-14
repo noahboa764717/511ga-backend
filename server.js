@@ -1,109 +1,71 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
 
 const app = express();
 app.use(cors());
 
+const API_KEY = '3ca9a6a23e314e9fb043dcc8f5db3829';
 const CAMERA_SOURCE_ID = 'PICK-CCTV-0020';
-const VIEW_ID = '19637';
 const MEDIA_SERVER_BASE = `https://sfs-msc-pub-lq-02.navigator.dot.ga.gov/rtplive/${CAMERA_SOURCE_ID}`;
 
-let cachedToken = null;
-let tokenExpiry = 0;
-let isFetching = false;
+let cachedManifest = null;
+let cacheExpiry = 0;
 
-async function getCloudBrowserToken() {
+async function getStreamManifest() {
   const now = Date.now();
-  if (cachedToken && now < tokenExpiry) return cachedToken;
-  if (isFetching) {
-    await new Promise(r => setTimeout(r, 2000));
-    if (cachedToken) return cachedToken;
+  if (cachedManifest && now < cacheExpiry) {
+    return cachedManifest;
   }
 
-  isFetching = true;
-  let browser = null;
-  try {
-    console.log('Launching serverless Chromium instance...');
-    
-    // Configure Chromium for cloud environments
-    chromium.setHeadlessMode = true;
-    chromium.setGraphicsMode = false;
+  // Fetch the official camera metadata feed directly using your verified API key
+  const response = await axios.get('https://511ga.org/api/v2/get/cameras', {
+    params: { key: API_KEY, format: 'json' },
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+    timeout: 10000
+  });
 
-    browser = await puppeteer.launch({
-      args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
-    });
+  const cameras = Array.isArray(response.data) ? response.data : (response.data.Cameras || response.data.data || []);
+  const cam = cameras.find(c => c.SourceId === CAMERA_SOURCE_ID || (c.Name && c.Name.includes(CAMERA_SOURCE_ID)));
 
-    const page = await browser.newPage();
-    let capturedToken = null;
-
-    await page.setRequestInterception(true);
-    page.on('request', req => {
-      const url = req.url();
-      if (url.includes('token=')) {
-        const match = url.match(/token=([a-zA-Z0-9\._\-]+)/);
-        if (match && match[1]) capturedToken = match[1];
-      }
-      req.continue();
-    });
-
-    await page.goto(`https://511ga.org/map/Cctv/${VIEW_ID}`, {
-      waitUntil: 'networkidle2',
-      timeout: 30000
-    });
-
-    await new Promise(r => setTimeout(r, 5000));
-
-    if (!capturedToken) {
-      const content = await page.content();
-      const match = content.match(/token=([a-zA-Z0-9\._\-]+)/);
-      if (match) capturedToken = match[1];
-    }
-
-    if (!capturedToken) throw new Error('Failed to intercept stream token.');
-
-    cachedToken = capturedToken;
-    tokenExpiry = now + 90000; // Cache for 90 seconds
-    return cachedToken;
-  } catch (err) {
-    console.error('Chromium Token Error:', err.message);
-    if (cachedToken) return cachedToken;
-    throw err;
-  } finally {
-    isFetching = false;
-    if (browser) await browser.close();
+  if (!cam) {
+    throw new Error(`Camera ${CAMERA_SOURCE_ID} not found in API response.`);
   }
+
+  // Extract token from the camera properties if present, or query the media server directly
+  const camString = JSON.stringify(cam);
+  const tokenMatch = camString.match(/token=([a-zA-Z0-9\._\-]+)/) || camString.match(/(eyJ[a-zA-Z0-9\._\-]+)/);
+  
+  let masterUrl = `${MEDIA_SERVER_BASE}/playlist.m3u8`;
+  if (tokenMatch) {
+    const token = tokenMatch[1] || tokenMatch[0];
+    masterUrl = `${MEDIA_SERVER_BASE}/playlist.m3u8?token=${token}`;
+  }
+
+  const playlistResponse = await axios.get(masterUrl, {
+    headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://511ga.org/' }
+  });
+
+  cachedManifest = playlistResponse.data;
+  cacheExpiry = now + 20000; // Cache for 20 seconds
+  return cachedManifest;
 }
 
 app.get('/stream.m3u8', async (req, res) => {
   try {
-    const token = await getCloudBrowserToken();
-    const masterUrl = `${MEDIA_SERVER_BASE}/playlist.m3u8?token=${token}`;
-
-    const response = await axios.get(masterUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://511ga.org/' }
-    });
-
-    let manifest = response.data;
-    manifest = manifest.replace(/^(chunklist_[^\s]+\.m3u8.*)$/gm, (match) => {
-      const cleanFile = match.split('?')[0];
-      return `${MEDIA_SERVER_BASE}/${cleanFile}?token=${token}`;
-    });
-
+    const manifest = await getStreamManifest();
     res.setHeader('Content-Type', 'application/x-mpegURL');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.send(manifest);
   } catch (error) {
-    res.status(500).send(`Proxy Error: ${error.message}`);
+    console.error('Proxy Error:', error.message);
+    res.status(500).send(`Error fetching stream: ${error.message}`);
   }
 });
 
-app.get('/', (req, res) => res.send('Sparticuz Chromium Proxy Active'));
+app.get('/', (req, res) => {
+  res.send('511GA Direct API Proxy Active');
+});
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Proxy running on port ${PORT}`));
