@@ -19,7 +19,7 @@ async function getValidToken() {
   }
 
   try {
-    // 1. Fetch cameras list using API key
+    // 1. Fetch camera data list via API key
     const response = await axios.get(`https://511ga.org/api/v2/get/cameras?key=${API_KEY}&format=json`, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
       timeout: 10000
@@ -32,30 +32,24 @@ async function getValidToken() {
       throw new Error(`Camera ${CAMERA_SOURCE_ID} not found in API response.`);
     }
 
-    // 2. Extract the internal View ID (e.g., 19637) from the Views array
-    const viewId = cam.Views && cam.Views[0] ? cam.Views[0].Id : null;
-    if (!viewId) {
-      throw new Error('No view ID found for camera.');
-    }
+    const viewId = cam.Views && cam.Views[0] ? cam.Views[0].Id : 19637;
 
-    // 3. Request token using the view ID
-    const customHeaders = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      'Accept': 'application/json, text/plain, */*',
-      'Referer': `https://511ga.org/map/Cctv/${viewId}`,
-      'X-Requested-With': 'XMLHttpRequest'
-    };
-
-    const tokenRes = await axios.get(`https://511ga.org/map/Cctv/${viewId}`, {
-      headers: customHeaders,
+    // 2. Request the stream token directly from 511GA's video URL endpoint using proper headers
+    const videoUrlRes = await axios.get(`https://511ga.org/GetVideoUrl?imageId=${viewId}&_=${Date.now()}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': `https://511ga.org/map/Cctv/${viewId}`,
+        'X-Requested-With': 'XMLHttpRequest'
+      },
       timeout: 8000
     });
 
-    const pageText = typeof tokenRes.data === 'string' ? tokenRes.data : JSON.stringify(tokenRes.data);
-    const tokenMatch = pageText.match(/token=([a-zA-Z0-9\._\-]+)/i) || pageText.match(/(eyJ[a-zA-Z0-9\._\-]+)/);
+    const dataStr = typeof videoUrlRes.data === 'string' ? videoUrlRes.data : JSON.stringify(videoUrlRes.data);
+    const tokenMatch = dataStr.match(/token=([a-zA-Z0-9\._\-]+)/) || dataStr.match(/(eyJ[a-zA-Z0-9\._\-]+)/);
 
     if (!tokenMatch) {
-      throw new Error('Could not parse token from CCTV page response.');
+      throw new Error('Token not found in GetVideoUrl response.');
     }
 
     cachedToken = tokenMatch[1] || tokenMatch[0];
