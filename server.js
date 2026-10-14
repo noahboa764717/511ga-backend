@@ -7,10 +7,8 @@ app.use(cors());
 
 const API_KEY = '3ca9a6a23e314e9fb043dcc8f5db3829';
 const CAMERA_SOURCE_ID = 'PICK-CCTV-0020';
-const CAMERA_INTERNAL_ID = 19637;
 const MEDIA_SERVER_BASE = `https://sfs-msc-pub-lq-02.navigator.dot.ga.gov/rtplive/${CAMERA_SOURCE_ID}`;
 
-// Token caching to respect 511GA rate limits (10 calls per 60 seconds)
 let cachedToken = null;
 let tokenExpiry = 0;
 
@@ -26,40 +24,40 @@ async function getValidToken() {
       timeout: 10000
     });
 
+    // Handle different root response wrappers
     const cameras = Array.isArray(response.data) ? response.data : (response.data.Cameras || response.data.data || []);
-    const cam = cameras.find(c => c.SourceId === CAMERA_SOURCE_ID || c.Id === CAMERA_INTERNAL_ID);
+    
+    // Find the specific camera by SourceId
+    const cam = cameras.find(c => c.SourceId === CAMERA_SOURCE_ID || (c.Name && c.Name.includes(CAMERA_SOURCE_ID)));
 
     if (!cam) {
-      throw new Error('Camera not found in API response.');
+      console.error('Available camera sample IDs:', cameras.slice(0, 5).map(c => c.SourceId));
+      throw new Error(`Camera ${CAMERA_SOURCE_ID} not found in API response.`);
     }
+
+    // Print full camera object to Render logs for inspection if needed
+    console.log('Found Camera Object:', JSON.stringify(cam, null, 2));
 
     let token = null;
-    if (cam.Views) {
-      for (const view of cam.Views) {
-        const str = view.Url || view.Token || view.StreamUrl || JSON.stringify(view);
-        const match = str.match(/token=([a-zA-Z0-9\._\-]+)/) || str.match(/(eyJ[a-zA-Z0-9\._\-]+)/);
-        if (match) {
-          token = match[1] || match[0];
-          break;
-        }
-      }
-    }
 
-    if (!token && cam.StreamUrl) {
-      const match = cam.StreamUrl.match(/token=([a-zA-Z0-9\._\-]+)/);
-      if (match) token = match[1];
+    // Search through all properties, views, or URLs inside the camera object
+    const camString = JSON.stringify(cam);
+    const tokenMatch = camString.match(/token=([a-zA-Z0-9\._\-]+)/) || camString.match(/(eyJ[a-zA-Z0-9\._\-]+)/);
+
+    if (tokenMatch) {
+      token = tokenMatch[1] || tokenMatch[0];
     }
 
     if (!token) {
-      throw new Error('Token could not be parsed from camera object.');
+      throw new Error('Could not extract token pattern from camera JSON properties.');
     }
 
     cachedToken = token;
-    tokenExpiry = now + 45000; // Cache valid for 45 seconds
+    tokenExpiry = now + 45000; // Cache for 45 seconds
     return cachedToken;
   } catch (error) {
-    console.error('API Error:', error.message);
-    if (cachedToken) return cachedToken; // Fallback to cached token if throttled
+    console.error('API Token Fetch Error:', error.message);
+    if (cachedToken) return cachedToken; // Fallback to cache if available
     throw error;
   }
 }
