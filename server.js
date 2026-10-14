@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const puppeteer = require('puppeteer');
 
 const app = express();
 app.use(cors());
@@ -11,60 +12,79 @@ const MEDIA_SERVER_BASE = `https://sfs-msc-pub-lq-02.navigator.dot.ga.gov/rtpliv
 
 let cachedToken = null;
 let tokenExpiry = 0;
+let isFetching = false;
 
-// Automatically fetch a fresh token using backend session cookies
-async function getAutomatedToken() {
+async function getBrowserToken() {
   const now = Date.now();
-  // Return cached token if it's still valid (tokens last ~2 mins, we refresh every 90 seconds)
   if (cachedToken && now < tokenExpiry) {
     return cachedToken;
   }
+  if (isFetching) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    if (cachedToken) return cachedToken;
+  }
 
+  isFetching = true;
+  let browser = null;
   try {
-    // 1. Initialize session by hitting 511ga.org to capture ASP.NET cookies
-    const homeRes = await axios.get('https://511ga.org/', {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-      timeout: 8000
+    console.log('Launching headless browser to capture live 511GA token...');
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
     });
 
-    const setCookieHeaders = homeRes.headers['set-cookie'];
-    let cookieString = '';
-    if (setCookieHeaders) {
-      cookieString = setCookieHeaders.map(c => c.split(';')[0]).join('; ');
-    }
+    const page = await browser.newPage();
+    let capturedToken = null;
 
-    // 2. Call GetVideoUrl with the active session cookies
-    const videoRes = await axios.get(`https://511ga.org/GetVideoUrl?imageId=${VIEW_ID}&_=${Date.now()}`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Cookie': cookieString,
-        'Referer': `https://511ga.org/map/Cctv/${VIEW_ID}`,
-        'X-Requested-With': 'XMLHttpRequest'
-      },
-      timeout: 8000
+    await page.setRequestInterception(true);
+    page.on('request', interceptedRequest => {
+      const url = interceptedRequest.url();
+      if (url.includes('token=')) {
+        const match = url.match(/token=([a-zA-Z0-9\._\-]+)/);
+        if (match && match[1]) {
+          capturedToken = match[1];
+        }
+      }
+      interceptedRequest.continue();
     });
 
-    const dataStr = typeof videoRes.data === 'string' ? videoRes.data : JSON.stringify(videoRes.data);
-    const tokenMatch = dataStr.match(/token=([a-zA-Z0-9\._\-]+)/) || dataStr.match(/(eyJ[a-zA-Z0-9\._\-]+)/);
+    await page.goto(`https://511ga.org/map/Cctv/${VIEW_ID}`, {
+      waitUntil: 'networkidle2',
+      timeout: 25000
+    });
 
-    if (!tokenMatch) {
-      throw new Error('Automated token pattern match failed.');
+    // Wait for the video player network requests to fire
+    await new Promise(resolve => setTimeout(resolve, 6000));
+
+    if (!capturedToken) {
+      const pageContent = await page.content();
+      const match = pageContent.match(/token=([a-zA-Z0-9\._\-]+)/) || pageContent.match(/(eyJ[a-zA-Z0-9\._\-]+)/);
+      if (match) {
+        capturedToken = match[1] || match[0];
+      }
     }
 
-    cachedToken = tokenMatch[1] || tokenMatch[0];
-    tokenExpiry = now + 90000; // Refresh every 90 seconds automatically
-    console.log('Successfully refreshed background stream token.');
+    if (!capturedToken) {
+      throw new Error('Could not capture token via browser interception.');
+    }
+
+    cachedToken = capturedToken;
+    tokenExpiry = now + 90000; // Cache valid for 90 seconds
+    console.log('Successfully captured fresh video token.');
     return cachedToken;
   } catch (error) {
-    console.error('Background Token Fetch Error:', error.message);
-    if (cachedToken) return cachedToken; // Fallback to old token if network hiccup occurs
+    console.error('Puppeteer Error:', error.message);
+    if (cachedToken) return cachedToken;
     throw error;
+  } finally {
+    isFetching = false;
+    if (browser) await browser.close();
   }
 }
 
 app.get('/stream.m3u8', async (req, res) => {
   try {
-    const token = await getAutomatedToken();
+    const token = await getBrowserToken();
     const masterUrl = `${MEDIA_SERVER_BASE}/playlist.m3u8?token=${token}`;
 
     const response = await axios.get(masterUrl, {
@@ -72,8 +92,6 @@ app.get('/stream.m3u8', async (req, res) => {
     });
 
     let manifest = response.data;
-
-    // Rewrite sub-playlist paths to route securely through your proxy
     manifest = manifest.replace(/^(chunklist_[^\s]+\.m3u8.*)$/gm, (match) => {
       const cleanFile = match.split('?')[0];
       return `${MEDIA_SERVER_BASE}/${cleanFile}?token=${token}`;
@@ -84,12 +102,12 @@ app.get('/stream.m3u8', async (req, res) => {
     res.send(manifest);
   } catch (error) {
     console.error('Proxy Error:', error.message);
-    res.status(500).send(`Error fetching stream: ${error.message}`);
+    res.status(500).send(`Error proxying stream: ${error.message}`);
   }
 });
 
 app.get('/', (req, res) => {
-  res.send('511GA Fully Automated Stream Proxy Active');
+  res.send('Puppeteer 511GA Video Proxy Active');
 });
 
 const PORT = process.env.PORT || 3000;
